@@ -1,0 +1,31 @@
+misc:
+  run_mode: test # Mode to run the network in
+  num_points: 99999 # Number of points
+  use_gpu: True # If GPU should be used or not
+
+data:
+  dataset: LidarKITTI_ME # Name of the dataset [StereoKITTI_ME, FlyingThings3D_ME, SemanticKITTI_ME, LidarKITTI_ME, WaymoOpen_ME]
+  root: ../lidar_kitti2 # Path to the data
+  remove_ground: True # Remove ground by simple thresholding of the height coordinate
+  augment_data: False # Augment the data by random rotation and translation
+  only_near_points: True # Only consider near points (less than 35m away) [Used in all scene flow algorithms]
+  only_front_points: False
+
+test:
+  batch_size: 1 # Test batch size
+  num_workers: 0 # Num of workers to use for the test data set
+  
+hyperparameters:
+  sigmoid_slope: 8
+  epsilon: .03
+  heading_loss_coeff: 5000
+  angle_loss_coeff: .5
+  mass_loss_coeff: .01
+  dim_loss_coeff: 250
+  prune_threshold: 50
+  confidence_threshold: .85
+  seg_threshold: .03
+  k_normals: 25
+  print_loss: False
+  lr: .015 #.015, .05
+  epochs: 500 #500, 150
