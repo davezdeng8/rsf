@@ -1,28 +1,15 @@
 # RSF: Optimizing Rigid Scene Flow From 3D Point Clouds Without Labels
 
-[David Deng](https://davezdeng8.github.io/) and [Avideh Zakhor](http://www-video.eecs.berkeley.edu/~avz/)
+[David Deng](https://davezdeng8.github.io/), [Avideh Zakhor](http://www-video.eecs.berkeley.edu/~avz/)
 
-[pdf](https://openaccess.thecvf.com/content/WACV2023/papers/Deng_RSF_Optimizing_Rigid_Scene_Flow_From_3D_Point_Clouds_Without_WACV_2023_paper.pdf)
+[[Paper]](https://openaccess.thecvf.com/content/WACV2023/papers/Deng_RSF_Optimizing_Rigid_Scene_Flow_From_3D_Point_Clouds_Without_WACV_2023_paper.pdf)
+[[Supplementary Material]](https://openaccess.thecvf.com/content/WACV2023/supplemental/Deng_RSF_Optimizing_Rigid_WACV_2023_supplemental.zip)
 
 In WACV 2023
 
 <img src="optimization.gif" width="500">
 
 ## Installation
-Our code has the following dependencies:
-
--PyTorch
-
--PyTorch3D
-
--Mayavi
-
--Scipy
-
--Matplotlib
-
--Shapely
-
 Create the conda environment:
 
 ```angular2html
@@ -62,5 +49,5 @@ If you find our work useful in your research, please consider citing:
 
 ## Acknowledgements
 
-This code borrows from [Weakly Supervised Learning of Rigid 3D Scene Flow
+This code borrows code from [Weakly Supervised Learning of Rigid 3D Scene Flow
 ](https://github.com/zgojcic/Rigid3DSceneFlow).
