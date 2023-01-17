@@ -2,7 +2,7 @@ import numpy as np
 import torch
 from pytorch3d import transforms
 from pytorch3d.structures import Pointclouds, list_to_padded
-# from pytorch3d.ops import ball_query
+from pytorch3d.ops import ball_query
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
 from shapely.geometry import Polygon
@@ -139,6 +139,18 @@ def get_box_rigid_transform(boxes, R, t):
     offset_p = transforms.Translate(offsets)
     return offset_n.compose(get_rigid_transform(R, t), offset_p)
 
+# def pointwise_rigid_transform(points, R, t):
+#     """
+#     :param points: nx3 tensor
+#     :param R: nx3x3 tensor
+#     :param t: nx3 tensor
+#     :return: nx3 tensor
+#     """
+#     points = points.unsqueeze(-1)
+#     rotated = torch.einsum('ijk,ikl->ijl', R, points)
+#     return rotated[...,0]+t
+#     # return torch.matmul(points.unsqueeze(1), R).squeeze(1)+t
+
 def parameters2boxes(box_parameters, anchors):
     """
     :param box_parameters: bxkx9 tensor
@@ -147,6 +159,7 @@ def parameters2boxes(box_parameters, anchors):
     """
     confidences = torch.sigmoid(box_parameters[:, :, :1])
     positions = box_parameters[:, :, 1:4] + anchors[:, :3].unsqueeze(0)
+    # positions = 9*(torch.sigmoid(box_parameters[:, :, 1:4])-.5) + anchors[:, :3].unsqueeze(0)
     dimensions = torch.exp(box_parameters[:, :, 4:7]) * anchors[:, 3:6].unsqueeze(0)
     headings = torch.atan2(-box_parameters[:, :, 7:8], box_parameters[:, :, 8:9] + 1e-3)+anchors[:,6:7].unsqueeze(0)
     return torch.cat((confidences, positions, dimensions, headings), dim=-1)
@@ -177,6 +190,7 @@ def inside_box(points, boxes, padded=True):
     """
     box_coord = points.update_padded(box_coordinate(points.points_padded(), boxes))
     box_shape = torch.stack([-boxes[:,4:7]/2, boxes[:,4:7]/2], axis=1)
+    # idx = torch.all(box_coord.inside_box(box_shape), dim=1) #python 3.6
     idx = box_coord.inside_box(box_shape)
     if padded:
         idx = idx.view(len(points.points_list()), -1)
@@ -207,6 +221,11 @@ def box_weights(points, boxes, crop_threshold = 1e-6, slope = 8, normalize_weigh
     idx = [torch.nonzero(box_weights[i][:points.num_points_per_cloud()[i//num_boxes]]>crop_threshold).squeeze(-1) for i in range(box_weights.shape[0])]
     not_empty = [len(i)>0 for i in idx]
     new_points = [points_padded[i][idx[i]] for i in range(box_weights.shape[0])]
+    # if not np.any(not_empty):
+    #     if normals is not None:
+    #         return None, None, None, None, None
+    #     else:
+    #         return None, None, None, None
     new_points = Pointclouds(new_points)
     new_weights = [box_weights[i][idx[i]] for i in range(box_weights.shape[0])]
     new_weights = list_to_padded(new_weights)
@@ -225,16 +244,31 @@ def normalize(input, dim = None, eps = 1e-7):
     return input / (torch.sum(input, dim=dim, keepdim=True) + eps)
 
 def perbox_params2boxesRt(perbox_params, anchors):
-    box_params, R, t = perbox_params[..., :9], perbox_params[..., 9:13], perbox_params[..., 13:]
+    box_params, R, t = perbox_params[..., :9], perbox_params[..., 9:13], perbox_params[..., 13:15]
     boxes = parameters2boxes(box_params, anchors)
     R = symmetric_orthogonalization(R.view(-1, 4), 2).view(R.shape[0], R.shape[1], 2, 2)
     R, t = rotation_2dto3d(R), translation_2dto3d(t)
     transform = get_box_rigid_transform(boxes.view(-1, 8), R.view(-1, 3, 3), t.view(-1, 3))
     return boxes.view(-1, 8), transform
 
+def get_reverse_boxesRt(params, boxes, transform):
+    c, R, t = torch.sigmoid(params[..., 0:1]).view(-1, 1), params[..., 1:5], params[..., 5:]
+    transformed_boxes = transform_boxes(boxes, transform)
+    transformed_boxes = torch.cat([c, transformed_boxes[:, 1:]], dim=-1)
+    R = symmetric_orthogonalization(R.view(-1, 4), 2).view(R.shape[0], R.shape[1], 2, 2)
+    R, t = rotation_2dto3d(R), translation_2dto3d(t)
+    transform = get_box_rigid_transform(transformed_boxes, R.view(-1, 3, 3), t.view(-1, 3))
+    return transformed_boxes, transform
+
 def global_params2Rt(global_params):
     R_ego, t_ego = global_params[..., :9], global_params[..., 9:]
     R_ego = symmetric_orthogonalization(R_ego)
+    return get_rigid_transform(R_ego, t_ego)
+
+def global_params2d2Rt(global_params):
+    R_ego, t_ego = global_params[..., :4], global_params[..., 4:]
+    R_ego = symmetric_orthogonalization(R_ego.view(-1, 4), 2)
+    R_ego, t_ego = rotation_2dto3d(R_ego), translation_2dto3d(t_ego)
     return get_rigid_transform(R_ego, t_ego)
 
 def transform_boxes(box_parameters, transform):
@@ -249,6 +283,17 @@ def transform_boxes(box_parameters, transform):
     transformed_positions = transform.transform_points(positions.unsqueeze(1)).squeeze(1)
     transformed_headings = headings+transforms.matrix_to_euler_angles(transform.get_matrix()[:,:3,:3], 'ZYX')[:, :1]
     return torch.cat((box_parameters[:,:1], transformed_positions, box_parameters[:,4:7], transformed_headings), dim=-1)
+
+# def get_z_rotation(R):
+#     """
+#     :param R: 3x3 or bx3x3 tensor
+#     :return: 2x2 or bx2x2 tensor
+#     """
+#     angle_2d = transforms.matrix_to_euler_angles(R, 'ZYX')[:, 0]
+#     # matrix_2d= torch.stack([torch.stack([torch.cos(angle_2d), -torch.sin(angle_2d)]),
+#     #              torch.stack([torch.sin(angle_2d), torch.cos(angle_2d)])]).permute(2, 0, 1)
+#     matrix_2d = angle2rot_2d(angle_2d)
+#     return matrix_2d
 
 def rotation_2dto3d(R):
     R = torch.cat([R, torch.zeros_like(R[...,:1])], axis=-1)
@@ -289,7 +334,40 @@ def box2corners(box_params):
     corners = torch.stack((p1, p2, p3, p4, p5, p6, p7, p8), dim=1)
     return corners
 
-def nms(box_params, confidence_threshold=.8, iou_threshold=.5):
+def tighten_boxes(boxes, points):
+    """
+    :param boxes: bx8+ tensor
+    :param points: nx3 tensor
+    :return: bx8+ tensor
+    """
+    points_r = points.repeat(boxes.shape[0], 1, 1)
+    box_coord = box_coordinate(points_r, boxes)
+    box_coord_pc = Pointclouds(box_coord)
+    box_shape = torch.stack([-boxes[:,4:7]/2-.25, boxes[:,4:7]/2+.25], dim=1)
+    idx = box_coord_pc.inside_box(box_shape)
+    idx = idx.view(points_r.shape[0], -1)
+    inside_box_pc = Pointclouds([p[i] for p, i in zip(box_coord, idx)])
+    tightened_boxes = inside_box_pc.get_bounding_boxes()
+    tightened_centers = torch.mean(tightened_boxes, dim=-1)
+    # tightened_centers[:, -1]=0 #fix this to just be the og
+    tightened_centers = box_coordinate(tightened_centers.unsqueeze(1), boxes, inverse=True).squeeze(1)
+    tightened_shape = tightened_boxes[:,:,1]-tightened_boxes[:,:,0]+.4
+    output = torch.cat([boxes[:,:1], tightened_centers, tightened_shape, boxes[:,7:]], dim=-1)
+    return output
+
+def cycle_consistency(boxes, transforms):
+    """
+    :param boxes: bx8+ tensor
+    :param transforms: b transforms
+    :return: b errors
+    """
+    box_copy = torch.clone(boxes)
+    box_copy[:,4:7] = 1
+    corners = box2corners(box_copy)
+    transformed_corners = transforms.transform_points(corners)
+    return torch.mean(torch.norm(corners-transformed_corners, dim=-1), dim=-1)
+
+def nms(box_params, confidence_threshold=.8, iou_threshold=.15, return_index = False):
     """
     :param box_params: kx8+ tensor
     :param iou_threshold:
@@ -304,17 +382,42 @@ def nms(box_params, confidence_threshold=.8, iou_threshold=.5):
         for j in range(num_boxes):
             iou[i,j] = polygons[i].intersection(polygons[j]).area/polygons[i].union(polygons[j]).area
     output = []
+    tops = []
     while np.any(box_params_copy[:,0]>confidence_threshold):
         top = np.argmax(box_params_copy[:,0])
+        tops.append(top)
         output.append(box_params[top])
         box_params_copy[iou[top]>iou_threshold,0]=0
     if len(output)>0:
+        if return_index:
+            return torch.stack(output, dim=0), tops
         return torch.stack(output, dim=0)
     else:
-        print('no detected objects')
+        # print('no detected objects')
         return None
 
-def prune_empty(points, box_params, threshold=800):
+def init_nms(box_params, iou_threshold=.15):
+    """
+    :param box_params: kx8+ tensor
+    :param iou_threshold:
+    :return: k'x8+ tensor subset of boxes
+    """
+    box_params_copy = torch.clone(box_params).detach().cpu().numpy()
+    corners = box2corners(box_params)[:,:4,:2].detach().cpu().numpy()
+    polygons = [Polygon(c) for c in corners]
+    num_boxes = len(polygons)
+    iou = np.zeros((num_boxes, num_boxes))
+    for i in range(num_boxes):
+        for j in range(num_boxes):
+            iou[i,j] = polygons[i].intersection(polygons[j]).area/polygons[i].union(polygons[j]).area
+    idx = []
+    while np.any(box_params_copy[:,0]!=-1):
+        top = np.argmax(np.abs(box_params_copy[:,0]-.5)-np.Inf*(box_params_copy[:,0]==-1))
+        idx.append(top)
+        box_params_copy[iou[top]>iou_threshold,0]=-1
+    return idx
+
+def num_points_in_box(points, box_params):
     """
     :param points: nx3 tensor
     :param box_params: kx8+ tensor
@@ -322,8 +425,7 @@ def prune_empty(points, box_params, threshold=800):
     :return: k'x8+ tensor subset of boxes
     """
     memberships = inside_box(Pointclouds([points]*box_params.shape[0]), box_params)
-    totals = torch.sum(memberships, dim=1)
-    return box_params[totals>threshold]
+    return torch.sum(memberships, dim=1)
 
 def box_segment(points, box_params):
     """
@@ -380,8 +482,6 @@ def graph_segmentation(graph_feat, threshold=.005):
     :param threshold:
     :return: n integer tensor of cc labels
     """
-    # pd = pairwise_distance(graph_feat, graph_feat)
-    # adjacency_matrix = pd<threshold
     adjacency_matrix = graph_connectivity_mem(graph_feat, graph_feat, threshold)
     graph = csr_matrix(adjacency_matrix)
     return torch.tensor(connected_components(csgraph=graph, directed=False, return_labels=True)[1], device=graph_feat.device, dtype=torch.float32)
@@ -410,14 +510,6 @@ def graph_connectivity_mem(pc1, pc2, threshold):
         pairwise_distance = x1x1 + inner + torch.transpose(x2x2, -1, -2)
         output.append((pairwise_distance<threshold).detach().cpu().numpy())
     return np.concatenate(output, axis=0)
-
-# def segmentation_metrics(pred, labels):
-#     pred_labels = torch.stack((pred, labels), dim=-1)
-#     true_positives = torch.all(pred_labels==torch.tensor([1,1], device='cuda'), dim=-1)
-#     false_positives = torch.all(pred_labels==torch.tensor([1,0], device='cuda'), dim=-1)
-#     true_negatives = torch.all(pred_labels==torch.tensor([0,0], device='cuda'), dim=-1)
-#     false_negatives = torch.all(pred_labels==torch.tensor([0,1], device='cuda'), dim=-1)
-
 
 def iou(pred, labels):
     if torch.sum(labels)==0:
@@ -450,7 +542,12 @@ def precision_at_one(pred, target):
 
     accuracy = (pred==target).sum() / len(pred)
 
-    return precision_f, precision_b, recall_f, recall_b, accuracy
+    tp = (pred[target == 1] == 1).float().sum()
+    fp = (pred[target == 0] == 1).float().sum()
+    fn = (pred[target == 1] == 0).float().sum()
+    tn = (pred[target == 0] == 0).float().sum()
+
+    return precision_f, precision_b, recall_f, recall_b, accuracy, tp, fp, fn, tn
 
 def compute_epe(est_flow, gt_flow, sem_label=None, eval_stats=False, mask=None):
     """
@@ -514,5 +611,7 @@ def compute_epe(est_flow, gt_flow, sem_label=None, eval_stats=False, mask=None):
         metrics['acc3d_s'] = acc3d_strict.item()
         metrics['acc3d_r'] = acc3d_relax.item()
         metrics['outlier'] = outlier.item()
+
+    metrics['n'] = len(gt_flow)
 
     return metrics

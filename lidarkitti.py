@@ -5,10 +5,21 @@ import logging
 import numpy as np
 import torch.utils.data as data
 
+projection_matrix = np.array([[7.25995070e+02, 6.04164924e+02, -9.75088151e+00, 4.48572800e+01],
+                              [-5.84187278e+00, 1.69760552e+02, -7.22248117e+02, 2.16379100e-01],
+                              [ 7.40252700e-03, 9.99963100e-01, -4.35161400e-03, 2.74588400e-03]])
+camera_size = (375, 1242)
+
 def normal_frame(points):
     x = -points[...,0:1]
     y = points[...,2:3]
     z = points[...,1:2]
+    return np.concatenate((x,y,z), axis = -1)
+
+def normal_frame_nusc(points):
+    x = -points[...,1:2]
+    y = points[...,0:1]
+    z = points[...,2:3]
     return np.concatenate((x,y,z), axis = -1)
 
 def rot_normal_frame(R):
@@ -40,13 +51,14 @@ class MELidarDataset(data.Dataset):
         self.root = config['data']['root']
         self.config = config
         self.num_points = config['misc']['num_points']
-        self.remove_ground = True if (
-                    config['data']['remove_ground'] and config['data']['dataset'] in ['StereoKITTI_ME', 'LidarKITTI_ME',
-                                                                                      'SemanticKITTI_ME',
-                                                                                      'WaymoOpen_ME']) else False
-        self.only_front_points = ('only_front_points' in config['data']) and (config['data']['only_front_points'])
+        self.remove_ground = config['data']['remove_ground']
+        if ('crop' in config['data']):
+            self.crop = config['data']['crop']
+        else:
+            self.crop = 'full'
         self.dataset = config['data']['dataset']
         self.only_near_points = config['data']['only_near_points']
+        self.filter_normals = config['data']['filter_normals']
         self.phase = phase
 
         self.randng = np.random.RandomState()
@@ -61,7 +73,6 @@ class MELidarDataset(data.Dataset):
         for name in subset_names:
             self.files.append(name)
 
-
     def __getitem__(self, idx):
         file = os.path.join(self.root, self.files[idx])
         file_name = file.replace(os.sep, '/').split('/')[-1]
@@ -70,6 +81,16 @@ class MELidarDataset(data.Dataset):
         data = np.load(file)
         pc_1 = data['pc1']
         pc_2 = data['pc2']
+
+        if 'pc1_normals' in data:
+            pc1_normals = data['pc1_normals']
+        else:
+            pc1_normals = np.zeros_like(pc_1)
+
+        if 'pc2_normals' in data:
+            pc2_normals = data['pc2_normals']
+        else:
+            pc2_normals = np.zeros_like(pc_2)
 
         if 'pc1_cam_mask' in data:
             pc1_cam_mask = data['pc1_cam_mask']
@@ -95,92 +116,128 @@ class MELidarDataset(data.Dataset):
         else:
             pose_2 = np.eye(4)
 
-        if 'mot_label_s' in data:
-            labels_1 = data['mot_label_s']
+        if 'sem_label_s' in data:
+            s_labels_1 = data['sem_label_s']
         else:
-            labels_1 = np.zeros(pc_1.shape[0])
+            s_labels_1 = np.zeros(pc_1.shape[0])
+
+        if 'sem_label_t' in data:
+            s_labels_2 = data['sem_label_t']
+        else:
+            s_labels_2 = np.zeros(pc_2.shape[0])
+
+        if 'mot_label_s' in data:
+            m_labels_1 = data['mot_label_s']
+        elif 'inst_pc1' in data:
+            m_labels_1 = data['inst_pc1']
+        else:
+            m_labels_1 = np.zeros(pc_1.shape[0])
 
         if 'mot_label_t' in data:
-            labels_2 = data['mot_label_t']
+            m_labels_2 = data['mot_label_t']
+        elif 'inst_pc2' in data:
+            m_labels_2 = data['inst_pc2']
         else:
-            labels_2 = np.zeros(pc_2.shape[0])
+            m_labels_2 = np.zeros(pc_2.shape[0])
 
         if 'flow' in data:
             flow = data['flow']
         else:
             flow = np.zeros((np.sum(pc1_cam_mask), 3), dtype=pc_1.dtype)
 
+        labels_1 = np.logical_and(m_labels_1, s_labels_1!=254)
+        labels_2 = np.logical_and(m_labels_2, s_labels_2!=254)
+
+        if self.dataset == 'NuScenes_ME':
+            pc_1 = normal_frame_nusc(pc_1)
+            pc_2 = normal_frame_nusc(pc_2)
+            pc_1[:,2]-=1.9
+            pc_2[:,2]-=1.9
+            pc1_normals = normal_frame_nusc(pc1_normals)
+            pc2_normals = normal_frame_nusc(pc2_normals)
+            flow = normal_frame_nusc(flow)
+        else:
+            pc_1 = normal_frame(pc_1)
+            pc_2 = normal_frame(pc_2)
+            pc1_normals = normal_frame(pc1_normals)
+            pc2_normals = normal_frame(pc2_normals)
+            flow = normal_frame(flow)
+
+
         # Remove the ground and far away points
         # In stereoKITTI the direct correspondences are provided therefore we remove,
         # if either of the points fullfills the condition (as in hplflownet, flot, ...)
 
-        if self.dataset in ["SemanticKITTI_ME", 'LidarKITTI_ME', "WaymoOpen_ME"]:
-            if self.remove_ground:
-                if self.phase == 'test':
-                    is_not_ground_s = (pc_1[:, 1] > -1.4)
-                    is_not_ground_t = (pc_2[:, 1] > -1.4)
+        if self.remove_ground:
+            is_not_ground_s = (pc_1[:, 2] > -1.4)
+            is_not_ground_t = (pc_2[:, 2] > -1.4)
 
-                    pc_1 = pc_1[is_not_ground_s, :]
-                    labels_1 = labels_1[is_not_ground_s]
-                    flow = flow[is_not_ground_s[pc1_cam_mask], :]
-                    pc1_cam_mask = pc1_cam_mask[is_not_ground_s]
+            pc_1 = pc_1[is_not_ground_s, :]
+            pc1_normals = pc1_normals[is_not_ground_s]
+            labels_1 = labels_1[is_not_ground_s]
+            flow = flow[is_not_ground_s[pc1_cam_mask], :]
+            pc1_cam_mask = pc1_cam_mask[is_not_ground_s]
 
-                    pc_2 = pc_2[is_not_ground_t, :]
-                    labels_2 = labels_2[is_not_ground_t]
-                    pc2_cam_mask = pc2_cam_mask[is_not_ground_t]
+            pc_2 = pc_2[is_not_ground_t, :]
+            pc2_normals = pc2_normals[is_not_ground_t]
+            labels_2 = labels_2[is_not_ground_t]
+            pc2_cam_mask = pc2_cam_mask[is_not_ground_t]
 
-                # In the training phase we randomly select if the ground should be removed or not
-                elif np.random.rand() > 1 / 4:
-                    is_not_ground_s = (pc_1[:, 1] > -1.4)
-                    is_not_ground_t = (pc_2[:, 1] > -1.4)
+        if self.filter_normals:
+            horizontal_normals_s = np.abs(pc1_normals[:, -1]) < .85
+            horizontal_normals_t = np.abs(pc2_normals[:, -1]) < .85
 
-                    pc_1 = pc_1[is_not_ground_s, :]
-                    labels_1 = labels_1[is_not_ground_s]
-                    flow = flow[is_not_ground_s[pc1_cam_mask], :]
-                    pc1_cam_mask = pc1_cam_mask[is_not_ground_s]
+            pc_1 = pc_1[horizontal_normals_s]
+            pc1_normals = pc1_normals[horizontal_normals_s]
+            labels_1 = labels_1[horizontal_normals_s]
+            flow = flow[horizontal_normals_s[pc1_cam_mask], :]
+            pc1_cam_mask = pc1_cam_mask[horizontal_normals_s]
 
-                    pc_2 = pc_2[is_not_ground_t, :]
-                    labels_2 = labels_2[is_not_ground_t]
-                    pc2_cam_mask = pc2_cam_mask[is_not_ground_t]
+            pc_2 = pc_2[horizontal_normals_t]
+            pc2_normals = pc2_normals[horizontal_normals_t]
+            labels_2 = labels_2[horizontal_normals_t]
+            pc2_cam_mask = pc2_cam_mask[horizontal_normals_t]
 
-            if self.only_near_points:
-                is_near_s = (np.amax(np.abs(pc_1), axis=1) < 35)
-                is_near_t = (np.amax(np.abs(pc_2), axis=1) < 35)
+        if self.only_near_points:
+            is_near_s = (np.amax(np.abs(pc_1), axis=1) < 35)
+            is_near_t = (np.amax(np.abs(pc_2), axis=1) < 35)
 
-                pc_1 = pc_1[is_near_s, :]
-                labels_1 = labels_1[is_near_s]
-                flow = flow[is_near_s[pc1_cam_mask], :]
-                pc1_cam_mask = pc1_cam_mask[is_near_s]
+            pc_1 = pc_1[is_near_s, :]
+            pc1_normals = pc1_normals[is_near_s]
+            labels_1 = labels_1[is_near_s]
+            flow = flow[is_near_s[pc1_cam_mask], :]
+            pc1_cam_mask = pc1_cam_mask[is_near_s]
 
-                pc_2 = pc_2[is_near_t, :]
-                labels_2 = labels_2[is_near_t]
-                pc2_cam_mask = pc2_cam_mask[is_near_t]
+            pc_2 = pc_2[is_near_t, :]
+            pc2_normals = pc2_normals[is_near_t]
+            labels_2 = labels_2[is_near_t]
+            pc2_cam_mask = pc2_cam_mask[is_near_t]
 
-            if self.only_front_points:
-                is_front_s = pc_1[:, 2]>=(np.abs(pc_1[:, 0])-8)
-                is_front_t = pc_2[:, 2]>=(np.abs(pc_2[:, 0])-8)
+        if self.crop=='front':
+            is_front_s = pc_1[:, 1]>=(np.abs(pc_1[:, 0])-8)
+            is_front_t = pc_2[:, 1]>=(np.abs(pc_2[:, 0])-8)
 
-                pc_1 = pc_1[is_front_s, :]
-                labels_1 = labels_1[is_front_s]
-                flow = flow[is_front_s[pc1_cam_mask], :]
-                pc1_cam_mask = pc1_cam_mask[is_front_s]
+            pc_1 = pc_1[is_front_s, :]
+            pc1_normals = pc1_normals[is_front_s]
+            labels_1 = labels_1[is_front_s]
+            flow = flow[is_front_s[pc1_cam_mask], :]
+            pc1_cam_mask = pc1_cam_mask[is_front_s]
 
-                pc_2 = pc_2[is_front_t, :]
-                labels_2 = labels_2[is_front_t]
-                pc2_cam_mask = pc2_cam_mask[is_front_t]
+            pc_2 = pc_2[is_front_t, :]
+            pc2_normals = pc2_normals[is_front_t]
+            labels_2 = labels_2[is_front_t]
+            pc2_cam_mask = pc2_cam_mask[is_front_t]
 
-        else:
-            if self.remove_ground:
-                is_not_ground = np.logical_not(np.logical_and(pc_1[:, 1] < -1.4, pc_2[:, 1] < -1.4))
-                pc_1 = pc_1[is_not_ground, :]
-                pc_2 = pc_2[is_not_ground, :]
-                flow = flow[is_not_ground, :]
+        elif self.crop=='camera':
+            pc_1 = pc_1[pc1_cam_mask, :]
+            pc1_normals = pc1_normals[pc1_cam_mask]
+            labels_1 = labels_1[pc1_cam_mask]
+            pc1_cam_mask = pc1_cam_mask[pc1_cam_mask]
 
-            if self.only_near_points:
-                is_near = np.logical_and(pc_1[:, 2] < 35, pc_1[:, 2] < 35)
-                pc_1 = pc_1[is_near, :]
-                pc_2 = pc_2[is_near, :]
-                flow = flow[is_near, :]
+            pc_2 = pc_2[pc2_cam_mask, :]
+            pc2_normals = pc2_normals[pc2_cam_mask]
+            labels_2 = labels_2[pc2_cam_mask]
+            pc2_cam_mask = pc2_cam_mask[pc2_cam_mask]
 
         # Augment the point cloud by randomly rotating and translating them (recompute the ego-motion if augmention is applied!)
         if self.augment_data and self.phase != 'test':
@@ -222,6 +279,7 @@ class MELidarDataset(data.Dataset):
             idx_2 = np.random.choice(pc_2.shape[0], pc_2.shape[0], replace=False)
 
         pc_1_eval = pc_1[idx_1, :]
+        pc1_normals_eval = pc1_normals[idx_1]
         flow_idx = np.cumsum(pc1_cam_mask)-1
         flow_idx = flow_idx[idx_1[pc1_cam_mask[idx_1]]]
         assert np.all(flow_idx>=0)
@@ -230,19 +288,22 @@ class MELidarDataset(data.Dataset):
         pc1_cam_mask = pc1_cam_mask[idx_1]
 
         pc_2_eval = pc_2[idx_2, :]
+        pc2_normals_eval = pc2_normals[idx_2]
         labels_2_eval = labels_2[idx_2]
         pc2_cam_mask = pc2_cam_mask[idx_2]
 
-        pc_1_eval = normal_frame(pc_1_eval).astype(np.float32)
-        pc_2_eval = normal_frame(pc_2_eval).astype(np.float32)
-        flow_eval = normal_frame(flow_eval).astype(np.float32)
+        pc_1_eval = pc_1_eval.astype(np.float32)
+        pc_2_eval = pc_2_eval.astype(np.float32)
+        pc1_normals_eval = pc1_normals_eval.astype(np.float32)
+        pc2_normals_eval = pc2_normals_eval.astype(np.float32)
+        flow_eval = flow_eval.astype(np.float32)
         labels_1_eval = labels_1_eval.astype(np.float32)
         labels_2_eval = labels_2_eval.astype(np.float32)
 
         R_ego = np.transpose(rot_normal_frame(R_ego)).astype(np.float32)
         t_ego = normal_frame(t_ego.reshape(3)).astype(np.float32)
 
-        return (pc_1_eval, pc_2_eval, pc1_cam_mask, pc2_cam_mask, labels_1_eval, labels_2_eval, R_ego, t_ego, flow_eval, file)
+        return (pc_1_eval, pc_2_eval, pc1_normals_eval, pc2_normals_eval, pc1_cam_mask, pc2_cam_mask, labels_1_eval, labels_2_eval, R_ego, t_ego, flow_eval, file)
 
     def __len__(self):
         return len(self.files)
@@ -251,21 +312,32 @@ class MELidarDataset(data.Dataset):
         logging.info('Resetting the data loader seed to {}'.format(seed))
         self.randng.seed(seed)
 
-
 class StereoKITTI_ME(MELidarDataset):
     # 3D Match dataset all files
     DATA_FILES = {
-        'test': 'kittisf_file_list.txt'
+        'test': './configs/kittisf_files.txt'
+    }
+
+class SemanticKITTI_ME(MELidarDataset):
+    # 3D Match dataset all files
+    DATA_FILES = {
+        'test': './configs/semantic_kitti_files.txt'
     }
 
 class LidarKITTI_ME(MELidarDataset):
     # 3D Match dataset all files
     DATA_FILES = {
-        'test': 'kittisf_file_list.txt'
+        'test': './configs/kittisf_files.txt'
+    }
+
+class NuScenes_ME(MELidarDataset):
+    # 3D Match dataset all files
+    DATA_FILES = {
+        'test': './configs/nuscenes_files.txt'
     }
 
 # Map the datasets to string names
-ALL_DATASETS = [StereoKITTI_ME, LidarKITTI_ME]
+ALL_DATASETS = [StereoKITTI_ME, SemanticKITTI_ME, LidarKITTI_ME, NuScenes_ME]
 
 dataset_str_mapping = {d.__name__: d for d in ALL_DATASETS}
 

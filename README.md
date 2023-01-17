@@ -29,10 +29,11 @@ Download the data from the following links:
 
 -[LidarKITTI](https://drive.google.com/file/d/1FmBD_c5q0O7JMd9ufKyHkuMg7V0bRR_f/view?usp=sharing)
 
+-[nuScenes](https://drive.google.com/file/d/1mCjDqJzaMdW0iiM2N2J5BNvo04dAvTbx/view)
+
 Extract them into rsf's parent directory 
-(rsf, stereo_kitti, and lidar_kitti2 are all in the same directory)
+(rsf and dataset directories are in the same directory)
 
 ## Usage
 Run 'without_learning2.py' to produce results for StereoKITTI. 
-You can change the '--dataset' argument to run on LidarKITTI, 
-and the '--visualize' argument to visualize predictions. 
+Change the cfg argument to run the other datasets. 
